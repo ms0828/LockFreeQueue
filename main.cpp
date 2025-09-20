@@ -6,7 +6,7 @@
 using namespace std;
 
 #define dfTestNum 3
-#define dfThreadNum 4
+#define dfThreadNum 5
 
 
 CLockFreeQueue<int> g_Queue;
@@ -56,18 +56,18 @@ unsigned int EnqueueAndDequeueProc1(void* arg)
 				printf("[ Dequeue Error] Dequeue is fail\n");
 				//exit(1);
 			}
-
+			
 			//--------------------------------------------------------
 			// ABA 검출 테스트
 			// - 노드 풀에 노드 반환 시, 데이터 0으로 초기화 후 반환
 			// - 근데 LockFreeStack에서 pop한 노드 데이터가 0이라면 top이 노드 풀에 반환한 노드를 가리키고 있는 것
 			//--------------------------------------------------------
-			if (ret != 1)
+			/*if (ret != 1)
 			{
 				_LOG(dfLOG_LEVEL_DEBUG, L"[ Dequeue Error] Dequeue Ret == %d\n", ret);
 				printf("[ Dequeue Error] Dequeue Ret == %d\n", ret);
-				//exit(1);
-			}
+				exit(1);
+			}*/
 		}
 
 		//printf("ok\n");
@@ -179,6 +179,29 @@ unsigned int EnqueueAndDequeueProc2(void* arg)
 	return 0;
 }
 
+
+
+
+unsigned int EnqueueAndDequeueProc3(void* arg)
+{
+	WaitForSingleObject(g_TestStartEvent, INFINITE);
+
+	int id = (int)arg;
+
+	if (id == 0)
+	{
+		int ret;
+		g_Queue.Dequeue(ret);
+	}
+
+	else
+	{
+		g_Queue.Enqueue(1);
+	}
+
+	return 0;
+}
+
 void Test1()
 {
 	g_TestStartEvent = CreateEvent(nullptr, true, false, nullptr);
@@ -272,11 +295,40 @@ void Test2()
 		//SetEvent(g_TestStartEvent);
 	}
 }
+void Test3()
+{
+	g_TestStartEvent = CreateEvent(nullptr, true, false, nullptr);
 
+	//---------------------------------------------------
+	// 테스트 3번
+	//---------------------------------------------------
+	for (int i = 0; i < dfThreadNum; i++)
+	{
+		HANDLE testTh = (HANDLE)_beginthreadex(nullptr, 0, EnqueueAndDequeueProc3, (void*)i, 0, nullptr);
+	}
+	
+	while (1)
+	{
+		if (_kbhit())
+		{
+			WCHAR ControlKey = _getwch();
+			if (ControlKey == L's' || ControlKey == L'S')
+			{
+				SetEvent(g_TestStartEvent);
+				printf("Test Start! \n");
+			}
+		}
+	
+		
+	}
+
+	
+	
+}
 
 int main()
 {
-	InitLog(dfLOG_LEVEL_DEBUG, FILE_DIRECT);
+	InitLog(dfLOG_LEVEL_DEBUG, CONSOLE);
 
 
 	Test1();

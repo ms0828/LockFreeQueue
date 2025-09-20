@@ -3,47 +3,69 @@
 #include "ObjectPool.h"
 #include "Log.h"
 
-
-// 디버깅을 위한 함수
-// 64비트 값을 64자리 이진 wide 문자열로 변환 (선행 0 포함)
-inline void to_bin64(uint64_t v, wchar_t out[80])
-{
-	int pos = 0;
-	for (int i = 63; i >= 0; --i)
-	{
-		out[pos++] = (v & (1ULL << i)) ? L'1' : L'0';
-
-		// 4비트마다 '/' 삽입, 단 마지막 그룹 뒤에는 넣지 않음
-		if (i % 4 == 0 && i != 0)
-			out[pos++] = L'/';
-	}
-	out[pos] = L'\0';
-}
-
-
 //-----------------------------------------------------
 // 메모리 디버깅 관련
 //-----------------------------------------------------
+#define MD_ENTRY_NUM 1000
+
+
+
+
+#define MD_TYPE_ENQUEUE 0xeeeeeeeeeeeeeeee
+#define MD_TYPE_DEQUEUE 0xdddddddddddddddd
 struct st_MemoryDebug
 {
-	ULONGLONG cnt;
+	st_MemoryDebug()
+		: threadId(0), type(0), start(0), end(0),
+		allocNode(nullptr), oldHead(nullptr), oldTail(nullptr),
+		curHead(nullptr), curTail(nullptr), value(0) {}
+	st_MemoryDebug(ULONGLONG _type, ULONGLONG _start, ULONGLONG _end, void* _allocNode, void* _oldNode, void* _afterNode, ULONGLONG _value)
+	{
+		threadId = GetCurrentThreadId();
+		type = _type;
+		if (type == MD_TYPE_ENQUEUE)
+		{
+			allocNode = _allocNode;
+			oldTail = _oldNode;
+			oldHead = nullptr;
+			curTail = _afterNode;
+			curHead = nullptr;
+			value = _value;
+		}
+		else
+		{
+			allocNode = nullptr;
+			oldTail = nullptr;
+			oldHead = _oldNode;
+			curTail = nullptr;
+			curHead = _afterNode;
+			value = _value;
+		}
+		start = _start;
+		end = _end;
+	}
 	ULONGLONG threadId;
-	ULONGLONG type;         // 1 : Enqueue  /  2: Dequeue
-	ULONGLONG stamp;        // Enqueue : tail Stamp  /  Dequeue : head Stamp
-	ULONGLONG enqueueCASNum;
-	void* beforePtr;    // Enqueue : before tail        /  Dequeue : after head
-	void* afterPtr;     // Enqueue : after tail        /  Dequeue : after head
+	ULONGLONG type;     // Enqueue / Dequeue
+	ULONGLONG start;
+	ULONGLONG end;
+	void* allocNode;
+	void* oldHead;
+	void* curHead;
+	void* oldTail;
+	void* curTail;
 	ULONGLONG value;
 };
 
-#define MD_ENTRY_NUM 200
+
+
 st_MemoryDebug g_MD[MD_ENTRY_NUM];
-ULONG g_MDCnt = 0;
-ULONG g_queueChangeCnt = 0;
-void SaveMemoryDebugEntry(ULONG cnt, ULONG threadId,ULONG type, ULONG stamp, ULONG enqueueCASCnt,void* bp, void* ap, ULONGLONG value)
+ULONG g_MDIndex = 0;
+ULONGLONG g_interlockCnt = 0;
+
+void SaveMemoryDebugEntry(ULONGLONG type, ULONGLONG start, ULONGLONG end, void* allocNode, void* oldNode, void* curNode, ULONGLONG value)
 {
-	int index = InterlockedIncrement(&g_MDCnt) % MD_ENTRY_NUM;
-	g_MD[index] = st_MemoryDebug{ cnt, threadId, type, stamp, enqueueCASCnt, bp, ap, value };
+	int index = InterlockedIncrement(&g_MDIndex) % MD_ENTRY_NUM;
+	g_MD[index] = st_MemoryDebug{type, start, end, allocNode, oldNode, curNode, value };
 }
 
 
@@ -75,108 +97,71 @@ public:
 		tail = head;
 		memset(g_MD, 0, sizeof(st_MemoryDebug) * MD_ENTRY_NUM);
 	}
-
+	
 	void Enqueue(T data)
 	{
 		Node* newNode = nodePool.allocObject();
 		newNode->data = data;
 
-		wchar_t beforeTail[81], afterTail[81];
-		wchar_t beforeMaskedTail[81], afterMaskedTail[81];
 		ULONGLONG stamp = 0;
 		Node* maskedT;
 		while (1)
 		{
+			int start = InterlockedIncrement(&g_interlockCnt);
+
 			Node* t = tail;
 			maskedT = UnpackingNode(t);
 			Node* nextTail = PackingNode(newNode, GetNodeStamp(t) + 1);
-
-			stamp = GetNodeStamp(t);
-			int cnt = stamp + GetNodeStamp(head);
-			if (g_LogMode != ELogMode::NOLOG)
-			{
-				to_bin64(reinterpret_cast<uint64_t>(t), beforeTail);
-				to_bin64(reinterpret_cast<uint64_t>(maskedT), beforeMaskedTail);
-				to_bin64(reinterpret_cast<uint64_t>(nextTail), afterTail);
-				to_bin64(reinterpret_cast<uint64_t>(newNode), afterMaskedTail);
-			}
-
+			
+			int end = InterlockedIncrement(&g_interlockCnt);
+			
 			if (InterlockedCompareExchangePointer((PVOID*)&maskedT->next, newNode, nullptr) == nullptr)
 			{
-				SaveMemoryDebugEntry(cnt, GetCurrentThreadId(), 1, stamp, 1 ,maskedT, newNode, data);
+				SaveMemoryDebugEntry(MD_TYPE_ENQUEUE, start, end, newNode, maskedT, nullptr, 1);
 				if (InterlockedCompareExchangePointer((PVOID*)&tail, nextTail, t) == t)
 				{
-					//-----------------------------------------
-					// 로그 데이터 저장
-					//-----------------------------------------
-					SaveMemoryDebugEntry(cnt, GetCurrentThreadId(), 1, stamp, 2, maskedT, newNode, data);
+					SaveMemoryDebugEntry(MD_TYPE_ENQUEUE, start, end, newNode, maskedT, newNode, 2);
 					break;
 				}
 				else
 				{
 					// tail가 바뀐 경우
-					//-----------------------------------------
-					// 로그 데이터 저장
-					//-----------------------------------------
-					SaveMemoryDebugEntry(cnt, GetCurrentThreadId(), 1, stamp, 2, maskedT, newNode, 0xffffffff);
+					SaveMemoryDebugEntry(MD_TYPE_ENQUEUE, start, end, newNode, maskedT, (void*)0xffffffffffffffff, 0xffffffffffffffff);
 					_LOG(dfLOG_LEVEL_DEBUG, L"[ Enqueue Error ] Change tail After 1st CAS\n");
 					//__debugbreak();
 				}
 			}
 		}
-
-		_LOG(dfLOG_LEVEL_DEBUG, L"[ Enqueue : Tail Stamp(%lld)] \n -   beforeTail : %ls \n -      masked : %ls (%016llx) \n -      afterTail : %ls\n -      masked : %ls (%016llx) \n", stamp ,beforeTail, beforeMaskedTail, maskedT, afterTail, afterMaskedTail, newNode);
-
+		//_LOG(dfLOG_LEVEL_DEBUG, L"[ Enqueue ]\n");
 		InterlockedIncrement(&size);
 	}
 
 	
 	bool Dequeue(T& value)
 	{
-		if (size == 0)
-			return false;
-
-		wchar_t beforeHead[81], afterHead[81];
-		wchar_t beforeMaskedHead[81], afterMaskedHead[81];
-		ULONGLONG stamp = 0;
 		while (1)
 		{
+			int start = InterlockedIncrement(&g_interlockCnt);
+
 			Node* h = head;
 			Node* maskedH = UnpackingNode(h);
-			Node* next = maskedH->next;
-			if (next == nullptr)
+			if (maskedH->next == nullptr)
 				return false;
-			Node* nextHead = PackingNode(next, GetNodeStamp(h) + 1);
-			T retValue = next->data;  // 소유권을 획득한 노드의 next의 data기 때문에 CAS 전에 캐싱해야함
 			
-			stamp = GetNodeStamp(h);
-			Node* debugingEmtpy = next->next;
-			int cnt = stamp + GetNodeStamp(tail);
+			Node* nextHead = PackingNode(maskedH->next, GetNodeStamp(h) + 1);
+			T retValue = maskedH->next->data;
+			
+			int end = InterlockedIncrement(&g_interlockCnt);
 
-			if (g_LogMode != ELogMode::NOLOG)
-			{
-				to_bin64(reinterpret_cast<uint64_t>(h), beforeHead);
-				to_bin64(reinterpret_cast<uint64_t>(maskedH), beforeMaskedHead);
-				to_bin64(reinterpret_cast<uint64_t>(nextHead), afterHead);
-				to_bin64(reinterpret_cast<uint64_t>(next), afterMaskedHead);
-			}
 			if (InterlockedCompareExchangePointer((PVOID*)&head, nextHead, h) == h)
 			{
 				value = retValue;
-
-				//-----------------------------------------
-				// 로그 데이터 저장
-				//-----------------------------------------
-				SaveMemoryDebugEntry(cnt, GetCurrentThreadId(), 2, stamp, 0, maskedH, next, retValue);
-				if (debugingEmtpy == nullptr)
-				{
-					SaveMemoryDebugEntry(cnt, GetCurrentThreadId(), 2, stamp, 0, maskedH, next, 0xdddddddd);
-				}
-				maskedH->data = 0; // 디버깅용 (반납하기 전 0으로 초기화 후 반납)
 				nodePool.freeObject(maskedH);
+				SaveMemoryDebugEntry(MD_TYPE_DEQUEUE, start, end, nullptr, maskedH, nextHead, retValue);
 				break;
 			}
 		}
+		//_LOG(dfLOG_LEVEL_DEBUG, L"[ Dequeue ]\n");
 		InterlockedDecrement(&size);
 		return true;
 	}
