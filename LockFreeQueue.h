@@ -6,7 +6,7 @@
 //-----------------------------------------------------
 // 메모리 디버깅 관련
 //-----------------------------------------------------
-#define MD_ENTRY_NUM 1000
+#define MD_ENTRY_NUM 200
 
 
 
@@ -139,19 +139,34 @@ public:
 	
 	bool Dequeue(T& value)
 	{
+		ULONGLONG q_size;
+		
+		q_size = InterlockedDecrement(&size);
+		if (q_size < 0)
+		{
+			InterlockedIncrement(&size);
+			return false;
+		}
+
+
 		while (1)
 		{
 			int start = InterlockedIncrement(&g_interlockCnt);
 
 			Node* h = head;
 			Node* maskedH = UnpackingNode(h);
-			if (maskedH->next == nullptr)
-				return false;
-			
-			Node* nextHead = PackingNode(maskedH->next, GetNodeStamp(h) + 1);
-			T retValue = maskedH->next->data;
-			
+			Node* next = maskedH->next;
+			/*if (maskedH->next == nullptr)
+				return false;*/
+			Node* nextHead = PackingNode(next, GetNodeStamp(h) + 1);
+			T retValue = next->data;
+
 			int end = InterlockedIncrement(&g_interlockCnt);
+
+			if (next == nullptr)
+				SaveMemoryDebugEntry(MD_TYPE_DEQUEUE, start, end, nullptr, maskedH, nextHead, 0xdddddddddddddddd);
+			
+				
 
 			if (InterlockedCompareExchangePointer((PVOID*)&head, nextHead, h) == h)
 			{
@@ -162,7 +177,7 @@ public:
 			}
 		}
 		//_LOG(dfLOG_LEVEL_DEBUG, L"[ Dequeue ]\n");
-		InterlockedDecrement(&size);
+		
 		return true;
 	}
 
@@ -184,7 +199,7 @@ private:
 public:
 	Node* head;
 	Node* tail;
-	ULONG size;
+	ULONGLONG size;
 
 
 	//--------------------------------------------

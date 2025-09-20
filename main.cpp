@@ -6,7 +6,7 @@
 using namespace std;
 
 #define dfTestNum 3
-#define dfThreadNum 5
+#define dfThreadNum 3
 
 
 CLockFreeQueue<int> g_Queue;
@@ -52,8 +52,8 @@ unsigned int EnqueueAndDequeueProc1(void* arg)
 			bool popRet = g_Queue.Dequeue(ret);
 			if (popRet == false)
 			{
-				_LOG(dfLOG_LEVEL_DEBUG, L"[ Dequeue Error] Dequeue is fail\n");
-				printf("[ Dequeue Error] Dequeue is fail\n");
+				//_LOG(dfLOG_LEVEL_DEBUG, L"[ Dequeue Error] Dequeue is fail\n");
+				//printf("[ Dequeue Error] Dequeue is fail\n");
 				//exit(1);
 			}
 			
@@ -188,16 +188,20 @@ unsigned int EnqueueAndDequeueProc3(void* arg)
 
 	int id = (int)arg;
 
-	if (id == 0)
+	while (1)
 	{
-		int ret;
-		g_Queue.Dequeue(ret);
-	}
+		if (id == 0)
+		{
+			int ret;
+			g_Queue.Dequeue(ret);
+		}
 
-	else
-	{
-		g_Queue.Enqueue(1);
+		else
+		{
+			g_Queue.Enqueue(1);
+		}
 	}
+	
 
 	return 0;
 }
